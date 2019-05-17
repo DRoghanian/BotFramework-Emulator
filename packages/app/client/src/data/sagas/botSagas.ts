@@ -40,87 +40,96 @@ import { BotAction, BotActionType, BotConfigWithPathPayload, botHashGenerated } 
 import { beginAdd } from '../action/notificationActions';
 import { generateHash } from '../botHelpers';
 import { RootState } from '../store';
-import { CommandServiceImpl } from '../../platform/commands/commandServiceImpl';
 
-import { refreshConversationMenu } from './sharedSagas';
-
-/** Opens up native open file dialog to browse for a .bot file */
-export function* browseForBot(): IterableIterator<any> {
-  yield call([ActiveBotHelper, ActiveBotHelper.confirmAndOpenBotFromFile]);
-}
-
-export function* generateHashForActiveBot(action: BotAction<BotConfigWithPathPayload>): IterableIterator<any> {
-  const { bot } = action.payload;
-  const generatedHash = yield call(generateHash, bot);
-  yield put(botHashGenerated(generatedHash));
-}
-
-export function* openBotViaFilePath(action: BotAction<string>) {
-  try {
-    yield call([ActiveBotHelper, ActiveBotHelper.confirmAndOpenBotFromFile], action.payload);
-  } catch (e) {
-    const errorNotification = beginAdd(newNotification(`An Error occurred opening the bot at ${action.payload}: ${e}`));
-    yield put(errorNotification);
+import { SharedSagas } from './sharedSagas';
+import { CommandServiceImpl, CommandServiceInstance } from '@bfemulator/sdk-shared';
+export class BotSagas {
+  @CommandServiceInstance()
+  private static commandService: CommandServiceImpl;
+  /** Opens up native open file dialog to browse for a .bot file */
+  public static *browseForBot(): IterableIterator<any> {
+    yield call([ActiveBotHelper, ActiveBotHelper.confirmAndOpenBotFromFile]);
   }
-}
 
-export function* openBotViaUrl(action: BotAction<Partial<StartConversationParams>>) {
-  const serverUrl = yield select((state: RootState) => state.clientAwareSettings.serverUrl);
-  if (!action.payload.user) {
-    // If no user is provided, select the current user
-    const users: UserSettings = yield select((state: RootState) => state.clientAwareSettings.users);
-    action.payload.user = users.usersById[users.currentUserId];
+  public static *generateHashForActiveBot(action: BotAction<BotConfigWithPathPayload>): IterableIterator<any> {
+    const { bot } = action.payload;
+    const generatedHash = yield call(generateHash, bot);
+    yield put(botHashGenerated(generatedHash));
   }
-  let error;
-  try {
-    const response = yield ConversationService.startConversation(serverUrl, action.payload);
-    if (!response.ok) {
-      error = `An Error occurred opening the bot at ${action.payload.endpoint}: ${response.statusText}`;
+
+  public static *openBotViaFilePath(action: BotAction<string>) {
+    try {
+      yield call([ActiveBotHelper, ActiveBotHelper.confirmAndOpenBotFromFile], action.payload);
+    } catch (e) {
+      const errorNotification = beginAdd(
+        newNotification(`An Error occurred opening the bot at ${action.payload}: ${e}`)
+      );
+      yield put(errorNotification);
     }
-    const debugMode = yield select((state: RootState) => state.clientAwareSettings.debugMode);
-    if (debugMode === DebugMode.Sidecar) {
-      // extract the conversation id from the body
-      const parsedBody = yield response.json();
-      const conversationId = parsedBody.id || '';
-      if (conversationId) {
-        // post debug init command to conversation
-        const activity = {
-          type: 'message',
-          text: '/INSPECT open',
-        };
-        const postActivityResponse = yield call(
-          [CommandServiceImpl, CommandServiceImpl.remoteCall],
-          SharedConstants.Commands.Emulator.PostActivityToConversation,
-          conversationId,
-          activity
-        );
-        if (postActivityResponse.statusCode >= 400) {
-          throw new Error(`An error occurred while POSTing "/INSPECT open" command to conversation ${conversationId}`);
-        }
-      } else {
-        throw new Error('An error occurred while trying to grab conversation ID from new conversation.');
+  }
+
+  public static *openBotViaUrl(action: BotAction<Partial<StartConversationParams>>) {
+    const serverUrl = yield select((state: RootState) => state.clientAwareSettings.serverUrl);
+    if (!action.payload.user) {
+      // If no user is provided, select the current user
+      const users: UserSettings = yield select((state: RootState) => state.clientAwareSettings.users);
+      action.payload.user = users.usersById[users.currentUserId];
+    }
+    let error;
+    try {
+      const response = yield ConversationService.startConversation(serverUrl, action.payload);
+      if (!response.ok) {
+        error = `An Error occurred opening the bot at ${action.payload.endpoint}: ${response.statusText}`;
       }
+      const debugMode = yield select((state: RootState) => state.clientAwareSettings.debugMode);
+      if (debugMode === DebugMode.Sidecar) {
+        // extract the conversation id from the body
+        const parsedBody = yield response.json();
+        const conversationId = parsedBody.id || '';
+        if (conversationId) {
+          // post debug init command to conversation
+          const activity = {
+            type: 'message',
+            text: '/INSPECT open',
+          };
+          const postActivityResponse = yield call(
+            [BotSagas.commandService, BotSagas.commandService.remoteCall],
+            SharedConstants.Commands.Emulator.PostActivityToConversation,
+            conversationId,
+            activity
+          );
+          if (postActivityResponse.statusCode >= 400) {
+            throw new Error(
+              `An error occurred while POSTing "/INSPECT open" command to conversation ${conversationId}`
+            );
+          }
+        } else {
+          throw new Error('An error occurred while trying to grab conversation ID from new conversation.');
+        }
+      }
+    } catch (e) {
+      error = e.message;
     }
-  } catch (e) {
-    error = e.message;
-  }
-  if (error) {
-    const errorNotification = beginAdd(newNotification(error));
-    yield put(errorNotification);
-  } else {
-    // remember the endpoint
-    yield call(
-      [CommandServiceImpl, CommandServiceImpl.remoteCall],
-      SharedConstants.Commands.Settings.SaveBotUrl,
-      action.payload.endpoint
-    );
+    if (error) {
+      const errorNotification = beginAdd(newNotification(error));
+      yield put(errorNotification);
+    } else {
+      // remember the endpoint
+      yield call(
+        [BotSagas.commandService, BotSagas.commandService.remoteCall],
+        SharedConstants.Commands.Settings.SaveBotUrl,
+        action.payload.endpoint
+      );
+    }
   }
 }
-
 export function* botSagas(): IterableIterator<ForkEffect> {
-  yield takeEvery(BotActionType.browse, browseForBot);
-  yield takeEvery(BotActionType.openViaUrl, openBotViaUrl);
-  yield takeEvery(BotActionType.openViaFilePath, openBotViaFilePath);
-  yield takeEvery(BotActionType.setActive, generateHashForActiveBot);
-  yield takeLatest([BotActionType.setActive, BotActionType.load, BotActionType.close], refreshConversationMenu);
+  yield takeEvery(BotActionType.browse, BotSagas.browseForBot);
+  yield takeEvery(BotActionType.openViaUrl, BotSagas.openBotViaUrl);
+  yield takeEvery(BotActionType.openViaFilePath, BotSagas.openBotViaFilePath);
+  yield takeEvery(BotActionType.setActive, BotSagas.generateHashForActiveBot);
+  yield takeLatest(
+    [BotActionType.setActive, BotActionType.load, BotActionType.close],
+    SharedSagas.refreshConversationMenu
+  );
 }
